@@ -1,0 +1,47 @@
+# Core Data Processing
+pandas>=2.1.3
+numpy>=1.26.0
+pyarrow>=14.0.1
+duckdb>=0.9.2
+
+# Cloud Storage
+minio>=7.2.0
+
+# Database
+psycopg2-binary>=2.9.9
+sqlalchemy>=2.0.23
+
+# Kafka & Streaming
+kafka-python>=2.0.2
+confluent-kafka>=2.3.0
+
+# ML & Feature Engineering
+scikit-learn>=1.3.2
+xgboost>=2.0.3
+scipy>=1.11.4
+
+# MLflow (experiment tracking)
+mlflow>=2.10.0
+
+# Utilities
+python-dotenv>=1.0.0
+pyyaml>=6.0.1
+click>=8.1.7
+tqdm>=4.66.1
+
+# Testing
+pytest>=7.4.3
+pytest-cov>=4.1.0
+
+# Logging and Monitoring
+python-json-logger>=2.0.7
+
+# Development
+black>=23.12.1
+pylint>=3.0.3
+flake8>=6.1.0
+isort>=5.13.2
+
+# NOTE: Apache Airflow runs in Docker containers (docker-compose.yml)
+# This local venv is for data simulation, ML training, and testing only
+# Airflow dependencies are already in the Docker image

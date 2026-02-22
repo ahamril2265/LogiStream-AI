@@ -1,0 +1,86 @@
+# Docker Compose Configuration for AI Logistics Platform
+# Simplified stack for local development (Python script orchestration instead of Airflow)
+#
+# Services:
+# - PostgreSQL: Metadata database
+# - MinIO: S3-compatible object storage
+# - MLflow: Experiment tracking and model registry
+#
+# Orchestration: main.py script (local Python execution)
+# Note: For production, use full docker-compose.yml with Airflow
+
+version: '3.8'
+
+services:
+  # PostgreSQL: Metadata database
+  postgres:
+    image: postgres:15-alpine
+    container_name: logistics-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-logistics_db}
+      POSTGRES_HOST_AUTH_METHOD: trust
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./scripts/init_postgres.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - logistics_network
+
+  # MinIO: S3-compatible object storage
+  minio:
+    image: minio/minio:latest
+    container_name: logistics-minio
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+      MINIO_CLIENT_MAX_BODY_SIZE: ${MINIO_CLIENT_MAX_BODY_SIZE:-5GB}
+    ports:
+      - "9000:9000"  # MinIO API
+      - "9001:9001"  # MinIO Console
+    volumes:
+      - minio_data:/data
+    command: minio server /data --console-address ":9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - logistics_network
+
+  # MLflow: Experiment tracking and model registry
+  mlflow:
+    image: python:3.11-slim
+    container_name: logistics-mlflow
+    environment:
+      MLFLOW_BACKEND_STORE_URI: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-logistics_db}
+      MLFLOW_DEFAULT_ARTIFACT_ROOT: /mlflow/artifacts
+    ports:
+      - "5000:5000"
+    volumes:
+      - mlflow_artifacts:/mlflow/artifacts
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - logistics_network
+    command: >
+      bash -c "pip install -q mlflow==2.10.0 psycopg2-binary &&
+               mlflow server --backend-store-uri postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-logistics_db} --default-artifact-root /mlflow/artifacts --host 0.0.0.0"
+
+volumes:
+  postgres_data:
+  minio_data:
+  mlflow_artifacts:
+
+networks:
+  logistics_network:
+    driver: bridge
