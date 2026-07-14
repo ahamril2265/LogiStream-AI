@@ -1,0 +1,274 @@
+# Docker Compose - Apache Airflow Orchestration Setup
+# Includes: Airflow, PostgreSQL, Redis, MinIO, MLflow
+# 
+# Services: master, worker, scheduler, webserver, redis, postgres, minio, mlflow
+# Usage: docker-compose -f docker-compose-airflow.yml up -d
+
+services:
+  # PostgreSQL - Airflow metadata database + application metadata
+  postgres:
+    image: postgres:15-alpine
+    container_name: airflow-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-airflow}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-airflow}
+      POSTGRES_DB: ${POSTGRES_DB:-airflow}
+      POSTGRES_HOST_AUTH_METHOD: trust
+      PGDATA: /var/lib/postgresql/data/pgdata
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_airflow_data:/var/lib/postgresql/data
+      - ./scripts/init_postgres.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-airflow}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - airflow_network
+    labels:
+      component: "metadata-store"
+
+  # Redis - Celery message broker and cache
+  redis:
+    image: redis:7-alpine
+    container_name: airflow-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_airflow_data:/data
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - airflow_network
+    labels:
+      component: "message-broker"
+
+  # MinIO - S3-compatible object storage for data lake
+  minio:
+    image: minio/minio:latest
+    container_name: airflow-minio
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+      MINIO_CLIENT_MAX_BODY_SIZE: ${MINIO_CLIENT_MAX_BODY_SIZE:-5GB}
+    ports:
+      - "9000:9000"  # MinIO API
+      - "9001:9001"  # MinIO Console
+    volumes:
+      - airflow_minio_data:/data
+    command: minio server /data --console-address ":9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - airflow_network
+    labels:
+      component: "data-lake"
+
+  # MLflow - ML experiment tracking and model registry
+  mlflow:
+    image: python:3.11-slim
+    container_name: airflow-mlflow
+    environment:
+      MLFLOW_BACKEND_STORE_URI: postgresql://${POSTGRES_USER:-airflow}:${POSTGRES_PASSWORD:-airflow}@postgres:5432/mlflow_db
+      MLFLOW_DEFAULT_ARTIFACT_ROOT: /mlflow/artifacts
+    ports:
+      - "5000:5000"
+    volumes:
+      - airflow_mlflow_artifacts:/mlflow/artifacts
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - airflow_network
+    command: >
+      bash -c "pip install -q mlflow==2.10.0 psycopg2-binary &&
+               mlflow server --backend-store-uri postgresql://${POSTGRES_USER:-airflow}:${POSTGRES_PASSWORD:-airflow}@postgres:5432/mlflow_db 
+               --default-artifact-root /mlflow/artifacts --host 0.0.0.0 --port 5000"
+    labels:
+      component: "ml-tracking"
+
+  # Airflow Webserver - Web UI
+  webserver:
+    image: apache/airflow:2.8.0-python3.11
+    container_name: airflow-webserver
+    environment:
+      AIRFLOW__CORE__DAGS_FOLDER: /opt/airflow/dags
+      AIRFLOW__CORE__LOAD_EXAMPLES: 'False'
+      AIRFLOW__CORE__LOAD_DEFAULT_CONNECTIONS: 'False'
+      AIRFLOW__CORE__EXECUTOR: CeleryExecutor
+      AIRFLOW__CELERY__BROKER_URL: redis://redis:6379/0
+      AIRFLOW__CELERY__RESULT_BACKEND: db+postgresql://${POSTGRES_USER:-airflow}:${POSTGRES_PASSWORD:-airflow}@postgres:5432/${POSTGRES_DB:-airflow}
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql://${POSTGRES_USER:-airflow}:${POSTGRES_PASSWORD:-airflow}@postgres:5432/${POSTGRES_DB:-airflow}
+      AIRFLOW__CORE__MAX_ACTIVE_RUNS_PER_DAGRUN: 1
+      AIRFLOW__CORE__PARALLELISM: 32
+      AIRFLOW__CORE__DAG_CONCURRENCY: 16
+      AIRFLOW__CORE__MAX_ACTIVE_TASKS_PER_DAGRUN: 16
+      PYTHONPATH: /opt/airflow:/opt/airflow/config:/opt/airflow/streaming
+      AIRFLOW_HOME: /opt/airflow
+    ports:
+      - "8080:8080"
+    volumes:
+      - airflow_data:/opt/airflow
+      - ./airflow/dags:/opt/airflow/dags
+      - ./airflow/logs:/opt/airflow/logs
+      - ./airflow/plugins:/opt/airflow/plugins
+      - .:/opt/airflow/projects
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    networks:
+      - airflow_network
+    command: webserver
+    labels:
+      component: "airflow-webserver"
+
+  # Airflow Scheduler - Schedules and orchestrates DAGs
+  scheduler:
+    image: apache/airflow:2.8.0-python3.11
+    container_name: airflow-scheduler
+    environment:
+      AIRFLOW__CORE__DAGS_FOLDER: /opt/airflow/dags
+      AIRFLOW__CORE__LOAD_EXAMPLES: 'False'
+      AIRFLOW__CORE__LOAD_DEFAULT_CONNECTIONS: 'False'
+      AIRFLOW__CORE__EXECUTOR: CeleryExecutor
+      AIRFLOW__CELERY__BROKER_URL: redis://redis:6379/0
+      AIRFLOW__CELERY__RESULT_BACKEND: db+postgresql://${POSTGRES_USER:-airflow}:${POSTGRES_PASSWORD:-airflow}@postgres:5432/${POSTGRES_DB:-airflow}
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql://${POSTGRES_USER:-airflow}:${POSTGRES_PASSWORD:-airflow}@postgres:5432/${POSTGRES_DB:-airflow}
+      AIRFLOW__CORE__MAX_ACTIVE_RUNS_PER_DAGRUN: 1
+      AIRFLOW__CORE__PARALLELISM: 32
+      AIRFLOW__CORE__DAG_CONCURRENCY: 16
+      PYTHONPATH: /opt/airflow:/opt/airflow/config:/opt/airflow/streaming
+      AIRFLOW_HOME: /opt/airflow
+    volumes:
+      - airflow_data:/opt/airflow
+      - ./airflow/dags:/opt/airflow/dags
+      - ./airflow/logs:/opt/airflow/logs
+      - ./airflow/plugins:/opt/airflow/plugins
+      - .:/opt/airflow/projects
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8793/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    networks:
+      - airflow_network
+    command: scheduler
+    labels:
+      component: "airflow-scheduler"
+
+  # Airflow Celery Worker - Executes tasks
+  worker:
+    image: apache/airflow:2.8.0-python3.11
+    container_name: airflow-worker
+    environment:
+      AIRFLOW__CORE__DAGS_FOLDER: /opt/airflow/dags
+      AIRFLOW__CORE__LOAD_EXAMPLES: 'False'
+      AIRFLOW__CORE__LOAD_DEFAULT_CONNECTIONS: 'False'
+      AIRFLOW__CORE__EXECUTOR: CeleryExecutor
+      AIRFLOW__CELERY__BROKER_URL: redis://redis:6379/0
+      AIRFLOW__CELERY__RESULT_BACKEND: db+postgresql://${POSTGRES_USER:-airflow}:${POSTGRES_PASSWORD:-airflow}@postgres:5432/${POSTGRES_DB:-airflow}
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql://${POSTGRES_USER:-airflow}:${POSTGRES_PASSWORD:-airflow}@postgres:5432/${POSTGRES_DB:-airflow}
+      AIRFLOW__CORE__MAX_ACTIVE_RUNS_PER_DAGRUN: 1
+      AIRFLOW__CELERY__WORKER_CONCURRENCY: 8
+      PYTHONPATH: /opt/airflow:/opt/airflow/config:/opt/airflow/streaming
+      AIRFLOW_HOME: /opt/airflow
+      DUMB_INIT_SETSID: "1"
+    volumes:
+      - airflow_data:/opt/airflow
+      - ./airflow/dags:/opt/airflow/dags
+      - ./airflow/logs:/opt/airflow/logs
+      - ./airflow/plugins:/opt/airflow/plugins
+      - .:/opt/airflow/projects
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - airflow_network
+    command: celery worker --loglevel=info
+    labels:
+      component: "airflow-worker"
+
+  # Airflow Flower - Celery monitoring UI
+  flower:
+    image: apache/airflow:2.8.0-python3.11
+    container_name: airflow-flower
+    environment:
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: db+postgresql://${POSTGRES_USER:-airflow}:${POSTGRES_PASSWORD:-airflow}@postgres:5432/${POSTGRES_DB:-airflow}
+      AIRFLOW_HOME: /opt/airflow
+    ports:
+      - "5555:5555"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - airflow_network
+    command: celery --broker=redis://redis:6379/0 flower --port=5555
+    labels:
+      component: "celery-monitoring"
+
+  # Airflow Sync - Kafka producer for simulating logistics data
+  producer:
+    image: python:3.11-slim
+    container_name: airflow-producer
+    working_dir: /opt/airflow/projects
+    environment:
+      PYTHONPATH: /opt/airflow/projects:/opt/airflow/config
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+    volumes:
+      - .:/opt/airflow/projects
+      - ./airflow/logs:/opt/airflow/logs
+    depends_on:
+      webserver:
+        condition: service_healthy
+    networks:
+      - airflow_network
+    command: >
+      bash -c "pip install -q -r requirements.txt &&
+               python -c 'from streaming.producer import start_producer; start_producer()'"
+    labels:
+      component: "data-producer"
+    restart: unless-stopped
+
+volumes:
+  postgres_airflow_data:
+    driver: local
+  redis_airflow_data:
+    driver: local
+  airflow_minio_data:
+    driver: local
+  airflow_mlflow_artifacts:
+    driver: local
+  airflow_data:
+    driver: local
+
+networks:
+  airflow_network:
+    driver: bridge
